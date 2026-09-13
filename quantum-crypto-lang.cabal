@@ -42,6 +42,8 @@ library
     QCL.Backend.OpenQASM
     QCL.Compiler.Driver
     QCL.Compiler.Fixture
+    QCL.Crypto.TodoLibrary
+    QCL.Daemon.AsyncExecutor
 
   build-depends:
     base >=4.16 && <5,
@@ -58,7 +60,24 @@ library
     lens,
     deepseq,
     hashable,
-    unordered-containers
+    unordered-containers,
+    time,
+    process
+
+  hs-source-dirs:   src
+  default-language: Haskell2010
+  ghc-options:      -O2
+
+executable qcl-compiler
+  import:           warnings
+  main-is:          QCL/Compiler/Main.hs
+  build-depends:
+    base >=4.16 && <5,
+    quantum-crypto-lang,
+    containers,
+    time,
+    process,
+    mtl
 
   hs-source-dirs:   src
   default-language: Haskell2010
@@ -73,13 +92,17 @@ test-suite quantum-crypto-lang-test
     Tests.Gate
     Tests.Parser
     Tests.Fixture
+    Tests.OpenQASM
+    Tests.Quipper
 
   build-depends:
     base >=4.16 && <5,
     quantum-crypto-lang,
     tasty,
     tasty-hunit,
-    tasty-quickcheck
+    tasty-quickcheck,
+    containers,
+    time
 
   hs-source-dirs:   test
   default-language: Haskell2010

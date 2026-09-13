@@ -19,6 +19,7 @@ import qualified Data.Map as Map
 import Control.Monad
 import Control.Concurrent
 import Control.Concurrent.Chan
+import Control.Monad.State (runState, execState)
 
 import QCL.Crypto.TodoLibrary
 import QCL.Daemon.AsyncExecutor
@@ -44,7 +45,7 @@ dispatch cmd args = case cmd of
 
 -- | Build quantum-crypto-lang
 buildCommand :: [String] -> IO ()
-buildCommand args = do
+buildCommand _args = do
   putStrLn "quantum-crypto-lang compiler"
   putStrLn "=============================="
   putStrLn ""
@@ -59,7 +60,7 @@ buildCommand args = do
   responseCh <- newChan
 
   -- Fork daemon thread
-  daemonTid <- forkIO $ runDaemonSimulation requestCh responseCh
+  _daemonTid <- forkIO $ runDaemonSimulation requestCh responseCh
 
   -- Start orchestration loop
   putStrLn "[*] Initializing build orchestration..."
@@ -79,7 +80,7 @@ orchestrateBuild st0 reqCh respCh = loop st0 0
     loop st iteration = do
       if iteration >= 18
         then do
-          putStrLn "[✓] All todos completed!"
+          putStrLn "[done] All todos completed!"
           return ()
         else do
           putStrLn $ "[Iteration " ++ show iteration ++ "]"
@@ -92,42 +93,43 @@ orchestrateBuild st0 reqCh respCh = loop st0 0
               loop st1 (iteration + 1)
 
             Just todo -> do
-              putStrLn $ "  Next todo: #" ++ show (todoId todo) ++ " - " ++ take 50 (content todo) ++ "..."
+              putStrLn $ "  Next todo: #" ++ show (todoId todo) ++ " - " ++ take 50 (todoContent todo) ++ "..."
 
               -- Create execution request
+              now <- getCurrentTime
               let authCtx = AuthContext
                       { userId = "qcl-orchestrator"
                       , permissions = ["build", "compile", "test"]
                       , scope = "quantum-crypto-lang"
                       , trustLevel = 5
                       }
-              let req = createExecutionRequest todo ("req-" ++ show iteration) authCtx
+              let req = createExecutionRequest todo ("req-" ++ show iteration) authCtx now
 
               -- Send to daemon
               writeChan reqCh req
-              putStrLn $ "  → Sent to daemon: {toolId=" ++ toolId req ++ "}"
+              putStrLn $ "  -> Sent to daemon: {toolId=" ++ reqToolId req ++ "}"
 
               -- Wait for response
               resp <- readChan respCh
-              putStrLn $ "  ← Received response: {status=" ++ show (status resp) ++ "}"
+              putStrLn $ "  <- Received response: {status=" ++ show (respStatus resp) ++ "}"
 
               -- Update todo state
-              now <- getCurrentTime
-              let execTime = realToFrac $ diffUTCTime (completedAt resp) (startedAt resp)
+              now2 <- getCurrentTime
+              let execTime = realToFrac $ diffUTCTime (respCompletedAt resp) (respStartedAt resp)
 
-              st2 <- case status resp of
+              st2 <- case respStatus resp of
                 ExecutionCompleted -> do
-                  putStrLn $ "     ✓ Execution time: {" ++ show execTime ++ "s}"
+                  putStrLn $ "     OK Execution time: {" ++ show execTime ++ "s}"
                   -- Mark todo as completed
-                  return $ execState (markCompleted (todoId todo) now (Just execTime)) st1
+                  return $ execState (markCompleted (todoId todo) now2 (Just execTime)) st1
 
                 ExecutionFailed -> do
-                  putStrLn $ "     ✗ FAILED: " ++ show (error resp)
+                  putStrLn $ "     FAILED: " ++ show (respError resp)
                   -- Mark todo as failed
-                  return $ execState (markFailed (todoId todo) now (show (error resp))) st1
+                  return $ execState (markFailed (todoId todo) now2 (show (respError resp))) st1
 
                 _ -> do
-                  putStrLn $ "     ✗ UNEXPECTED STATUS: " ++ show (status resp)
+                  putStrLn $ "     UNEXPECTED STATUS: " ++ show (respStatus resp)
                   return st1
 
               -- Show progress
@@ -148,11 +150,11 @@ testCommand args = do
       putStrLn "Testing Wire model..."
       case verify743WireFixture of
         Left err -> do
-          putStrLn $ "  ✗ Error: " ++ err
+          putStrLn $ "  Error: " ++ err
           exitFailure
         Right () -> do
-          putStrLn "  ✓ 743-wire fixture validated"
-          putStrLn "  ✓ All tests passed"
+          putStrLn "  743-wire fixture validated"
+          putStrLn "  All tests passed"
           exitSuccess
 
     _ -> do
@@ -173,19 +175,19 @@ verifyCommand args = do
       putStrLn ""
       case verify743WireFixture of
         Left err -> do
-          putStrLn $ "✗ Verification failed:"
+          putStrLn "Verification failed:"
           putStrLn $ "  " ++ err
           exitFailure
 
         Right () -> do
           let reg = canonical743Wires
-          putStrLn "✓ Wire extraction successful"
-          putStrLn $ "  • Register size: {" ++ show (registerSize reg) ++ "}"
-          putStrLn $ "  • Total allocated: {" ++ show (totalAllocated reg) ++ "}"
-          putStrLn "  • Alternation pattern: confirmed"
-          putStrLn "  • Canonical form: verified"
+          putStrLn "Wire extraction successful"
+          putStrLn $ "  Register size: {" ++ show (registerSize reg) ++ "}"
+          putStrLn $ "  Total allocated: {" ++ show (totalAllocated reg) ++ "}"
+          putStrLn "  Alternation pattern: confirmed"
+          putStrLn "  Canonical form: verified"
           putStrLn ""
-          putStrLn "✓ All fixture validation checks passed"
+          putStrLn "All fixture validation checks passed"
           exitSuccess
 
     _ -> do
@@ -202,23 +204,23 @@ statusCommand _ = do
   now <- getCurrentTime
   let st = initTodoState now
 
-  let (todos, _) = runState getAllTodos st
+  let (allTodos, _) = runState getAllTodos st
   let (progress, _) = runState getCompletionPercentage st
 
-  putStrLn $ "Total todos: {" ++ show (length todos) ++ "}"
+  putStrLn $ "Total todos: {" ++ show (length allTodos) ++ "}"
   putStrLn $ "Progress: {" ++ show (round progress :: Int) ++ "%}"
   putStrLn ""
 
   putStrLn "Status breakdown:"
-  let (pending, _) = runState (getTodosByStatus Pending) st
-  let (inProg, _) = runState (getTodosByStatus InProgress) st
-  let (completed, _) = runState (getTodosByStatus Completed) st
-  let (failed, _) = runState (getTodosByStatus Failed) st
+  let (pendingTodos, _) = runState (getTodosByStatus Pending) st
+  let (inProgTodos, _) = runState (getTodosByStatus InProgress) st
+  let (completedTodos, _) = runState (getTodosByStatus Completed) st
+  let (failedTodos, _) = runState (getTodosByStatus Failed) st
 
-  putStrLn $ "  • Pending:     {" ++ show (length pending) ++ "}"
-  putStrLn $ "  • In Progress: {" ++ show (length inProg) ++ "}"
-  putStrLn $ "  • Completed:   {" ++ show (length completed) ++ "}"
-  putStrLn $ "  • Failed:      {" ++ show (length failed) ++ "}"
+  putStrLn $ "  Pending:     {" ++ show (length pendingTodos) ++ "}"
+  putStrLn $ "  In Progress: {" ++ show (length inProgTodos) ++ "}"
+  putStrLn $ "  Completed:   {" ++ show (length completedTodos) ++ "}"
+  putStrLn $ "  Failed:      {" ++ show (length failedTodos) ++ "}"
   putStrLn ""
 
   exitSuccess
@@ -257,19 +259,19 @@ runDaemonSimulation inCh outCh = do
 
     -- For demo: always succeed
     let response = ExecutionResponse
-          { requestId = requestId req
-          , status = ExecutionCompleted
-          , result = Just "Build succeeded"
-          , error = Nothing
-          , telemetry = Telemetry
-              { queueWaitTime = 0.1
-              , executionTime = 1.0
-              , resourceUsage = ResourceUsage 50.0 256.0 0
-              , events = []
+          { respRequestId = reqId req
+          , respStatus = ExecutionCompleted
+          , respResult = Just "Build succeeded"
+          , respError = Nothing
+          , respTelemetry = Telemetry
+              { telQueueWait = 0.1
+              , telExecTime = 1.0
+              , telResourceUsage = ResourceUsage 50.0 256.0 0
+              , telEvents = []
               }
-          , startedAt = now
-          , completedAt = addUTCTime 1.0 now
-          , backend = "simulated"
+          , respStartedAt = now
+          , respCompletedAt = addUTCTime 1.0 now
+          , respBackend = "simulated"
           }
 
     -- Send response

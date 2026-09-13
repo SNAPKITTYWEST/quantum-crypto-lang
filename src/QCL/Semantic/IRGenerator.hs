@@ -101,7 +101,7 @@ addRegisterToContext ctx decl = do
       -- Allocate wires for register
       let wires = [WireId i | i <- [cgWireCounter ctx .. cgWireCounter ctx + n - 1]]
       let regType = case regType decl of
-            QuantumReg -> QCL.IR.Register.QuantumRegister
+            QuantumReg -> QCL.IR.Register.QRegType
             AncillaReg -> AncillaRegister
             ClassicalReg -> ClassicalRegister
 

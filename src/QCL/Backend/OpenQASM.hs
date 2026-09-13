@@ -23,6 +23,12 @@ module QCL.Backend.OpenQASM
   , gateToQASM
   , operationToQASM
   , formatQASMGate
+  , formatUnaryGate
+  , formatParametricGate
+  , formatBinaryGate
+  , formatTernaryGate
+  , countQubitsInQASM
+  , exportCircuitWithMetadata
   ) where
 
 import Data.Aeson
@@ -78,13 +84,13 @@ registerDeclarations circ =
 
       -- Main quantum register
       qregDecl = if qubits > 0
-                 then ["qreg q[" ++ show qubits ++ ");"]
+                 then ["qreg q[" ++ show qubits ++ "];"]
                  else []
 
       -- Classical register for measurement results (same size as measurements or qubits)
       cregSize = if measurements > 0 then measurements else qubits
       cregDecl = if cregSize > 0
-                 then ["creg c[" ++ show cregSize ++ ");"]
+                 then ["creg c[" ++ show cregSize ++ "];"]
                  else []
   in qregDecl ++ cregDecl
 

@@ -28,30 +28,40 @@ import System.Exit
 
 import QCL.Crypto.TodoLibrary
 
--- | Main daemon orchestrator
+-- | Main daemon orchestrator.
+-- Note: Chan fields have no Show instance, so we provide a custom instance.
 data DaemonOrchestrator = DaemonOrchestrator
   { requestQueue :: Chan ExecutionRequest
   , responseChannel :: Chan ExecutionResponse
   , activeRequests :: Map.Map String DaemonRequestState
   , completedRequests :: [ExecutionResponse]
   , daemonStartTime :: UTCTime
-  } deriving (Show)
+  }
+
+instance Show DaemonOrchestrator where
+  show orch = "DaemonOrchestrator { activeRequests = "
+    ++ show (activeRequests orch)
+    ++ ", completedRequests = "
+    ++ show (length (completedRequests orch))
+    ++ ", daemonStartTime = "
+    ++ show (daemonStartTime orch)
+    ++ " }"
 
 -- | State of a request being processed
 data DaemonRequestState = DaemonRequestState
   { daemonState :: DaemonState
-  , request :: ExecutionRequest
+  , drsRequest :: ExecutionRequest
   , policyApproval :: PolicyDecision
   , resourceLock :: Maybe String
-  , startTime :: Maybe UTCTime
-  , observations :: [String]
+  , drsStartTime :: Maybe UTCTime
+  , drsObservations :: [String]
   } deriving (Show, Eq)
 
 -- | Policy validation result
 data PolicyValidation = PolicyValidation
   { isValid :: Bool
   , invalidReasons :: [String]
-  , requiredResources :: [String]
+  , pvRequiredResources :: [String]
   } deriving (Show, Eq)
 
 -- | Resource requirement
@@ -69,29 +79,30 @@ instance FromJSON ResourceRequirement
 --
 -- Policy must be enforced BEFORE execution regardless of ROSA request.
 -- This is the deterministic control layer.
+-- Uses early-return via nested checks for proper short-circuiting.
 enforceGlobalPolicy :: ExecutionRequest -> IO PolicyValidation
 enforceGlobalPolicy req = do
-  let toolId' = toolId req
-  let args = arguments req
+  let tool = reqToolId req
+  let args = reqArguments req
 
   -- Check tool registry
-  toolValid <- toolInRegistry toolId'
-  unless toolValid $
-    return $ PolicyValidation False ["Tool not in registry: " ++ toolId'] []
-
-  -- Validate parameters
-  paramErrors <- validateParameters toolId' args
-  unless (null paramErrors) $
-    return $ PolicyValidation False paramErrors []
-
-  -- Check resource constraints
-  requiredResources <- getResourceRequirements toolId'
-  resourcesAvailable <- checkResourceAvailability requiredResources
-  unless resourcesAvailable $
-    return $ PolicyValidation False ["Required resources unavailable"] requiredResources
-
-  -- All checks passed
-  return $ PolicyValidation True [] requiredResources
+  toolValid <- toolInRegistry tool
+  if not toolValid
+    then return $ PolicyValidation False ["Tool not in registry: " ++ tool] []
+    else do
+      -- Validate parameters
+      paramErrors <- validateParameters tool args
+      if not (null paramErrors)
+        then return $ PolicyValidation False paramErrors []
+        else do
+          -- Check resource constraints
+          resources <- getResourceRequirements tool
+          resourcesAvailable <- checkResourceAvailability resources
+          if not resourcesAvailable
+            then return $ PolicyValidation False ["Required resources unavailable"] resources
+            else
+              -- All checks passed
+              return $ PolicyValidation True [] resources
 
 -- | Tool registry: Only these tools are allowed
 toolInRegistry :: String -> IO Bool
@@ -122,8 +133,8 @@ toolInRegistry t = do
 
 -- | Parameter constraints for each tool
 validateParameters :: String -> Map.Map String String -> IO [String]
-validateParameters toolId' args = do
-  case toolId' of
+validateParameters tool args = do
+  case tool of
     "qcl.build.wire" -> do
       case Map.lookup "wire_count" args of
         Just wc -> do
@@ -159,8 +170,8 @@ validateParameters toolId' args = do
 
 -- | Resource requirements for each tool
 getResourceRequirements :: String -> IO [String]
-getResourceRequirements toolId' = do
-  case toolId' of
+getResourceRequirements tool = do
+  case tool of
     "qcl.build.wire" -> return ["BuildLock"]
     "qcl.build.gate" -> return ["BuildLock"]
     "qcl.build.operation" -> return ["BuildLock"]
@@ -190,7 +201,7 @@ checkResourceAvailability reqs = do
 
 -- | Request lifecycle state machine
 --
--- State progression: RECEIVED → VALIDATING → AUTHORIZED → QUEUED → RUNNING → OBSERVING → COMPLETED
+-- State progression: RECEIVED -> VALIDATING -> AUTHORIZED -> QUEUED -> RUNNING -> OBSERVING -> COMPLETED
 -- Failure states: REJECTED, CANCELLED, TIMEOUT, FAILED, BACKEND_ERROR, POLICY_BLOCKED
 
 -- | Receive and validate request
@@ -201,11 +212,11 @@ receiveAndValidate req = do
   -- Step 1: RECEIVED
   let state1 = DaemonRequestState
         { daemonState = DaemonReceived
-        , request = req
+        , drsRequest = req
         , policyApproval = DeniedSafety "not yet evaluated"
         , resourceLock = Nothing
-        , startTime = Just now
-        , observations = ["Request received: " ++ requestId req]
+        , drsStartTime = Just now
+        , drsObservations = ["Request received: " ++ reqId req]
         }
 
   -- Step 2: VALIDATING
@@ -216,43 +227,42 @@ receiveAndValidate req = do
     else do
       let state2 = state1
             { daemonState = DaemonValidating
-            , observations = observations state1 ++
+            , drsObservations = drsObservations state1 ++
                 ["Policy validation passed", "Parameters validated"]
             }
 
       -- Step 3: AUTHORIZED
-      let policyDecision = case policyResult of
+      let policyDec = case policyResult of
             PolicyValidation True [] _ -> Allowed
             PolicyValidation False reasons _ -> DeniedSafety (unwords reasons)
             _ -> DeniedSafety "unknown"
 
       let state3 = state2
             { daemonState = DaemonAuthorized
-            , policyApproval = policyDecision
-            , observations = observations state2 ++ ["Authorization passed"]
+            , policyApproval = policyDec
+            , drsObservations = drsObservations state2 ++ ["Authorization passed"]
             }
 
       return $ Right state3
 
 -- | Execute cabal build command
 executeCabalBuild :: String -> String -> IO (ExitCode, String, String)
-executeCabalBuild module' toolId' = do
-  let cmd = "cabal build " ++ module'
+executeCabalBuild moduleName tool = do
+  let cmd = "cabal build " ++ moduleName
   (exitCode, stdout, stderr) <- readProcessWithExitCode "sh" ["-c", cmd] ""
   return (exitCode, stdout, stderr)
 
 -- | Execute tool based on request
 executeToolRequest :: ExecutionRequest -> IO (Either String ExecutionResponse)
 executeToolRequest req = do
-  let tool = toolId req
-  let ops = arguments req
+  let tool = reqToolId req
   startTime <- getCurrentTime
 
   -- Dispatch to appropriate backend
   result <- case tool of
     "qcl.init" -> do
       (code, out, err) <- readProcessWithExitCode "cabal" ["init", "--lib"] ""
-      return $ (code, out, err)
+      return (code, out, err)
 
     "qcl.build.wire" -> executeCabalBuild "QCL.IR.Wire" "qcl.build.wire"
     "qcl.build.gate" -> executeCabalBuild "QCL.IR.Gate" "qcl.build.gate"
@@ -283,33 +293,33 @@ executeToolRequest req = do
         ExitSuccess -> ExecutionCompleted
         ExitFailure _ -> ExecutionFailed
 
-  let telemetry = Telemetry
-        { queueWaitTime = 0
-        , executionTime = realToFrac (diffUTCTime endTime startTime)
-        , resourceUsage = ResourceUsage 0 0 0
-        , events =
+  let tel = Telemetry
+        { telQueueWait = 0
+        , telExecTime = realToFrac (diffUTCTime endTime startTime)
+        , telResourceUsage = ResourceUsage 0 0 0
+        , telEvents =
             [ TelemetryEvent
                 { eventType = "execution_start"
-                , timestamp = startTime
-                , message = "Tool execution started"
+                , tevTimestamp = startTime
+                , tevMessage = "Tool execution started"
                 }
             , TelemetryEvent
                 { eventType = "execution_complete"
-                , timestamp = endTime
-                , message = "Tool execution completed"
+                , tevTimestamp = endTime
+                , tevMessage = "Tool execution completed"
                 }
             ]
         }
 
   return $ Right ExecutionResponse
-    { requestId = requestId req
-    , status = execStatus
-    , result = Just stdout
-    , error = if null stderr then Nothing else Just stderr
-    , telemetry = telemetry
-    , startedAt = startTime
-    , completedAt = endTime
-    , backend = "ghc-cabal"
+    { respRequestId = reqId req
+    , respStatus = execStatus
+    , respResult = Just stdout
+    , respError = if null stderr then Nothing else Just stderr
+    , respTelemetry = tel
+    , respStartedAt = startTime
+    , respCompletedAt = endTime
+    , respBackend = "ghc-cabal"
     }
 
 -- | Main daemon process
@@ -348,32 +358,32 @@ processRequestLoop orchestrator = forever $ do
     Left err -> do
       now <- getCurrentTime
       let errorResponse = ExecutionResponse
-            { requestId = requestId req
-            , status = Rejected
-            , result = Nothing
-            , error = Just err
-            , telemetry = Telemetry 0 0 (ResourceUsage 0 0 0) []
-            , startedAt = now
-            , completedAt = now
-            , backend = "daemon"
+            { respRequestId = reqId req
+            , respStatus = Rejected
+            , respResult = Nothing
+            , respError = Just err
+            , respTelemetry = Telemetry 0 0 (ResourceUsage 0 0 0) []
+            , respStartedAt = now
+            , respCompletedAt = now
+            , respBackend = "daemon"
             }
       writeChan outChan errorResponse
 
-    Right requestState -> do
+    Right _requestState -> do
       -- Execute request
       execResult <- executeToolRequest req
       case execResult of
         Left err -> do
           now <- getCurrentTime
           let errorResponse = ExecutionResponse
-                { requestId = requestId req
-                , status = BackendError
-                , result = Nothing
-                , error = Just err
-                , telemetry = Telemetry 0 0 (ResourceUsage 0 0 0) []
-                , startedAt = now
-                , completedAt = now
-                , backend = "daemon"
+                { respRequestId = reqId req
+                , respStatus = BackendError
+                , respResult = Nothing
+                , respError = Just err
+                , respTelemetry = Telemetry 0 0 (ResourceUsage 0 0 0) []
+                , respStartedAt = now
+                , respCompletedAt = now
+                , respBackend = "daemon"
                 }
           writeChan outChan errorResponse
 

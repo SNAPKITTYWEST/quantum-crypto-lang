@@ -15,11 +15,11 @@ module QCL.IR.Register where
 
 import Data.Aeson
 import Data.List (sortBy)
+import Data.Maybe (fromMaybe)
 import Data.Ord (comparing)
 import GHC.Generics
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import qualified Data.Text as T
 
 import QCL.IR.Wire
 
@@ -32,7 +32,7 @@ instance FromJSON RegisterName
 
 -- | Register type
 data RegisterType
-  = QuantumRegister      -- ^ Qubit register (quantum data)
+  = QRegType             -- ^ Qubit register (quantum data)
   | AncillaRegister      -- ^ Ancilla register (helper qubits)
   | ClassicalRegister    -- ^ Classical bit register (measurement results)
   | CompositeRegister    -- ^ Nested composite register
@@ -99,7 +99,7 @@ emptyRegisterMapping = RegisterMapping
 createQuantumRegister :: RegisterName -> [WireId] -> Maybe String -> QuantumRegister
 createQuantumRegister name wires desc = QuantumRegister
   { regName = name
-  , regType = QuantumRegister
+  , regType = QRegType
   , regSize = length wires
   , regWires = wires
   , regBase = Nothing
@@ -120,15 +120,12 @@ createAncillaRegister name wires desc = QuantumRegister
   }
 
 -- | Create a classical register
-createClassicalRegister :: RegisterName -> Int -> QuantumRegister
-createClassicalRegister name size = QuantumRegister
-  { regName = name
-  , regType = ClassicalRegister
-  , regSize = size
-  , regWires = []
-  , regBase = Nothing
-  , regParent = Nothing
-  , description = Nothing
+createClassicalRegister :: RegisterName -> Int -> ClassicalRegister
+createClassicalRegister name size = ClassicalRegister
+  { crName = name
+  , crSize = size
+  , crBits = replicate size 0
+  , crMeasuredFrom = Nothing
   }
 
 -- | Create a register slice (subset of wires)
@@ -255,7 +252,7 @@ getRegisterStats :: RegisterMapping -> RegisterStats
 getRegisterStats regmap =
   let qRegs = getAllQuantumRegisters regmap
       cRegs = getAllClassicalRegisters regmap
-      qTotal = sum [regSize r | r <- qRegs, regType r == QuantumRegister]
+      qTotal = sum [regSize r | r <- qRegs, regType r == QRegType]
       aTotal = sum [regSize r | r <- qRegs, regType r == AncillaRegister]
       cTotal = sum [crSize r | r <- cRegs]
       totalRegs = length qRegs + length cRegs
@@ -290,7 +287,7 @@ renameRegister oldName newName regmap = do
       let newQRegs = Map.delete oldName $ Map.insert newName (qreg { regName = newName }) oldQRegs
       let (RegisterName oldStr) = oldName
       let (RegisterName newStr) = newName
-      let newNameToWires = Map.delete oldStr $ Map.insert newStr (getRegisterWires oldStr regmap) (nameToWires regmap)
+      let newNameToWires = Map.delete oldStr $ Map.insert newStr (fromMaybe [] (getRegisterWires oldStr regmap)) (nameToWires regmap)
       Right regmap
         { quantumRegs = newQRegs
         , nameToWires = newNameToWires
@@ -307,7 +304,7 @@ registerToString :: QuantumRegister -> String
 registerToString reg =
   let (RegisterName name) = regName reg
       typeStr = case regType reg of
-        QuantumRegister -> "quantum"
+        QRegType -> "quantum"
         AncillaRegister -> "ancilla"
         ClassicalRegister -> "classical"
         CompositeRegister -> "composite"
@@ -331,14 +328,6 @@ parseRegisterSlice s =
               _ -> Left $ "Invalid slice syntax: " ++ s
             _ -> Left $ "Invalid slice syntax: " ++ s
         _ -> Left $ "Invalid slice syntax: " ++ s
-
--- | Helper: map function
-mapM :: (Monad m) => (a -> m b) -> [a] -> m [b]
-mapM _ [] = return []
-mapM f (x:xs) = do
-  y <- f x
-  ys <- mapM f xs
-  return (y:ys)
 
 -- | 743-wire standard register (for quantum-crypto-lang fixture)
 create743WireRegisters :: RegisterMapping

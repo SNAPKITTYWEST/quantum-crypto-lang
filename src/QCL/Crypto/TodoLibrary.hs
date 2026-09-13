@@ -9,7 +9,7 @@ import GHC.Generics
 import qualified Data.Map as Map
 import qualified Data.Text as T
 import Control.Monad.State
-import Data.List (sortBy)
+import Data.List (sortBy, (\\))
 import Data.Ord (comparing)
 
 -- | Todo status in the quantum-crypto-lang build lifecycle
@@ -32,49 +32,52 @@ instance ToJSON Priority
 instance FromJSON Priority
 
 -- | A single todo in the crypto build workflow
+-- All fields prefixed with @todo@ for Haskell2010 compatibility.
 data Todo = Todo
   { todoId :: Int
-  , content :: String
-  , status :: TodoStatus
-  , priority :: Priority
-  , dependencies :: [Int]  -- ^ IDs of todos that must complete first
-  , createdAt :: UTCTime
-  , updatedAt :: UTCTime
-  , completedAt :: Maybe UTCTime
-  , moduleName :: String
-  , toolId :: String
-  , executionTime :: Maybe Double  -- ^ seconds
-  , error :: Maybe String
+  , todoContent :: String
+  , todoStatus :: TodoStatus
+  , todoPriority :: Priority
+  , todoDependencies :: [Int]      -- ^ IDs of todos that must complete first
+  , todoCreatedAt :: UTCTime
+  , todoUpdatedAt :: UTCTime
+  , todoCompletedAt :: Maybe UTCTime
+  , todoModuleName :: String
+  , todoToolId :: String
+  , todoExecTime :: Maybe Double   -- ^ seconds
+  , todoError :: Maybe String
   } deriving (Show, Eq, Generic)
 
 instance ToJSON Todo
 instance FromJSON Todo
 
--- | Execution request sent to async daemon
+-- | Execution request sent to async daemon.
+-- All fields prefixed with @req@ for Haskell2010 compatibility.
 data ExecutionRequest = ExecutionRequest
-  { requestId :: String
-  , toolId :: String
-  , operation :: String
-  , arguments :: Map.Map String String
-  , priority :: Int
-  , deadline :: Maybe UTCTime
-  , authorizationContext :: AuthContext
-  , correlationId :: String
+  { reqId :: String
+  , reqToolId :: String
+  , reqOperation :: String
+  , reqArguments :: Map.Map String String
+  , reqPriority :: Int
+  , reqDeadline :: Maybe UTCTime
+  , reqAuthContext :: AuthContext
+  , reqCorrelationId :: String
   } deriving (Show, Eq, Generic)
 
 instance ToJSON ExecutionRequest
 instance FromJSON ExecutionRequest
 
--- | Response from async daemon
+-- | Response from async daemon.
+-- All fields prefixed with @resp@ for Haskell2010 compatibility.
 data ExecutionResponse = ExecutionResponse
-  { requestId :: String
-  , status :: ExecutionStatus
-  , result :: Maybe String
-  , error :: Maybe String
-  , telemetry :: Telemetry
-  , startedAt :: UTCTime
-  , completedAt :: UTCTime
-  , backend :: String
+  { respRequestId :: String
+  , respStatus :: ExecutionStatus
+  , respResult :: Maybe String
+  , respError :: Maybe String
+  , respTelemetry :: Telemetry
+  , respStartedAt :: UTCTime
+  , respCompletedAt :: UTCTime
+  , respBackend :: String
   } deriving (Show, Eq, Generic)
 
 instance ToJSON ExecutionResponse
@@ -111,12 +114,13 @@ data AuthContext = AuthContext
 instance ToJSON AuthContext
 instance FromJSON AuthContext
 
--- | Telemetry collected during execution
+-- | Telemetry collected during execution.
+-- Fields prefixed with @tel@ to avoid collision with Todo.executionTime.
 data Telemetry = Telemetry
-  { queueWaitTime :: Double
-  , executionTime :: Double
-  , resourceUsage :: ResourceUsage
-  , events :: [TelemetryEvent]
+  { telQueueWait :: Double
+  , telExecTime :: Double
+  , telResourceUsage :: ResourceUsage
+  , telEvents :: [TelemetryEvent]
   } deriving (Show, Eq, Generic)
 
 instance ToJSON Telemetry
@@ -135,8 +139,8 @@ instance FromJSON ResourceUsage
 -- | Individual telemetry event
 data TelemetryEvent = TelemetryEvent
   { eventType :: String
-  , timestamp :: UTCTime
-  , message :: String
+  , tevTimestamp :: UTCTime
+  , tevMessage :: String
   } deriving (Show, Eq, Generic)
 
 instance ToJSON TelemetryEvent
@@ -297,41 +301,37 @@ resolveDependencies tid = do
   case Map.lookup tid (todos st) of
     Nothing -> return $ DependencyResolution False [tid] []
     Just t -> do
-      let deps = dependencies t
+      let deps = todoDependencies t
       depStatuses <- mapM getTodo deps
-      let completed = [d | (Just todo) <- depStatuses, todoId todo `elem` deps, status todo == Completed]
-      let failed = [d | (Just todo) <- depStatuses, todoId todo `elem` deps, status todo == Failed]
-      if length failed > 0
-        then return $ DependencyResolution False failed []
-        else if length completed == length deps
+      let completedIds = [todoId td | Just td <- depStatuses, todoStatus td == Completed]
+      let failedIds    = [todoId td | Just td <- depStatuses, todoStatus td == Failed]
+      if not (null failedIds)
+        then return $ DependencyResolution False failedIds []
+        else if length completedIds == length deps
           then return $ DependencyResolution True [] [tid]
-          else return $ DependencyResolution False (deps \\ completed) []
-  where
-    (\\\) = flip (filter . flip notElem)
+          else return $ DependencyResolution False (deps \\ completedIds) []
 
 -- | Get next executable todo
 getNextTodo :: TodoM (Maybe Todo)
 getNextTodo = do
   st <- get
-  let pending = Map.filter (\t -> status t == Pending) (todos st)
+  let pending = Map.filter (\t -> todoStatus t == Pending) (todos st)
   results <- mapM (\t -> (todoId t,) <$> resolveDependencies (todoId t)) (Map.elems pending)
   let executable = [t | (tid, res) <- results, canExecute res, Just t <- [Map.lookup tid (todos st)]]
   case executable of
     [] -> return Nothing
     (t:_) -> return $ Just t
 
--- | Mark todo as in progress
-markInProgress :: Int -> TodoM ()
-markInProgress tid = do
+-- | Mark todo as in progress.
+-- Accepts a UTCTime parameter (pure state operation, no IO).
+markInProgress :: Int -> UTCTime -> TodoM ()
+markInProgress tid now = do
   st <- get
   case Map.lookup tid (todos st) of
     Nothing -> return ()
     Just t -> do
-      now <- lift getCurrentTime
-      let updated = t { status = InProgress, updatedAt = now }
+      let updated = t { todoStatus = InProgress, todoUpdatedAt = now }
       put $ st { todos = Map.insert tid updated (todos st), lastUpdated = now }
-  where
-    lift = id  -- Would use actual lift in StateT context
 
 -- | Mark todo as completed
 markCompleted :: Int -> UTCTime -> Maybe Double -> TodoM ()
@@ -341,10 +341,10 @@ markCompleted tid now execTime = do
     Nothing -> return ()
     Just t -> do
       let updated = t
-            { status = Completed
-            , updatedAt = now
-            , completedAt = Just now
-            , executionTime = execTime
+            { todoStatus = Completed
+            , todoUpdatedAt = now
+            , todoCompletedAt = Just now
+            , todoExecTime = execTime
             }
       put $ st { todos = Map.insert tid updated (todos st), lastUpdated = now }
 
@@ -356,9 +356,9 @@ markFailed tid now err = do
     Nothing -> return ()
     Just t -> do
       let updated = t
-            { status = Failed
-            , updatedAt = now
-            , error = Just err
+            { todoStatus = Failed
+            , todoUpdatedAt = now
+            , todoError = Just err
             }
       put $ st { todos = Map.insert tid updated (todos st), lastUpdated = now }
 
@@ -366,9 +366,9 @@ markFailed tid now err = do
 getCompletionPercentage :: TodoM Double
 getCompletionPercentage = do
   st <- get
-  let total = length (todos st)
-  let completed = length $ filter (\t -> status t == Completed) (Map.elems (todos st))
-  return $ if total == 0 then 0 else fromIntegral completed / fromIntegral total * 100
+  let total = Map.size (todos st)
+  let done = length $ filter (\t -> todoStatus t == Completed) (Map.elems (todos st))
+  return $ if total == 0 then 0 else fromIntegral done / fromIntegral total * 100
 
 -- | Get all todos sorted by priority and ID
 getAllTodos :: TodoM [Todo]
@@ -380,41 +380,38 @@ getAllTodos = do
 getTodosByStatus :: TodoStatus -> TodoM [Todo]
 getTodosByStatus s = do
   st <- get
-  return $ filter (\t -> status t == s) (Map.elems (todos st))
+  return $ filter (\t -> todoStatus t == s) (Map.elems (todos st))
 
--- | Create execution request for a todo
-createExecutionRequest :: Todo -> String -> AuthContext -> TodoM ExecutionRequest
-createExecutionRequest t correlId authCtx = do
-  now <- lift getCurrentTime
-  let deadline = Just $ addUTCTime 60 now  -- 60 second timeout
-  return $ ExecutionRequest
-    { requestId = "req-" ++ show (todoId t)
-    , toolId = toolId t
-    , operation = content t
-    , arguments = Map.fromList
-        [ ("module", moduleName t)
+-- | Create execution request for a todo.
+-- Pure function: accepts a UTCTime so no IO is needed.
+createExecutionRequest :: Todo -> String -> AuthContext -> UTCTime -> ExecutionRequest
+createExecutionRequest t correlId authCtx now =
+  ExecutionRequest
+    { reqId = "req-" ++ show (todoId t)
+    , reqToolId = todoToolId t
+    , reqOperation = todoContent t
+    , reqArguments = Map.fromList
+        [ ("module", todoModuleName t)
         , ("todo_id", show (todoId t))
         ]
-    , priority = case priority t of
+    , reqPriority = case todoPriority t of
         Critical -> 4
         High -> 3
         Medium -> 2
         Low -> 1
-    , deadline = deadline
-    , authorizationContext = authCtx
-    , correlationId = correlId
+    , reqDeadline = Just $ addUTCTime 60 now  -- 60 second timeout
+    , reqAuthContext = authCtx
+    , reqCorrelationId = correlId
     }
-  where
-    lift = id
 
 -- | Record execution in audit log
 recordExecution :: ExecutionLog -> TodoM ()
-recordExecution log = do
+recordExecution entry = do
   st <- get
-  put $ st { executionLog = log : executionLog st }
+  put $ st { executionLog = entry : executionLog st }
 
 -- | Get execution history for a todo
 getExecutionHistory :: Int -> TodoM [ExecutionLog]
 getExecutionHistory tid = do
   st <- get
-  return $ filter (\log -> logTodoId log == tid) (executionLog st)
+  return $ filter (\entry -> logTodoId entry == tid) (executionLog st)

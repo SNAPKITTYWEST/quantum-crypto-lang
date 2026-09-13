@@ -19,8 +19,6 @@ import Data.Ord (comparing)
 import GHC.Generics
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import qualified Data.Graph as Graph
-
 import QCL.IR.Wire
 import QCL.IR.Gate
 
@@ -89,7 +87,7 @@ instance FromJSON Operation
 data CircuitDAG = CircuitDAG
   { operations :: Map.Map OperationId Operation
   , operationCount :: Int
-  , dependencies :: [Dependency]
+  , dagDependencies :: [Dependency]
   , adjacencyList :: Map.Map OperationId [OperationId]  -- ^ (opId → dependent opIds)
   , reverseAdjacency :: Map.Map OperationId [OperationId]  -- ^ (opId → dependencies)
   , topologicalOrder :: Maybe [OperationId]
@@ -104,7 +102,7 @@ emptyCircuitDAG :: CircuitDAG
 emptyCircuitDAG = CircuitDAG
   { operations = Map.empty
   , operationCount = 0
-  , dependencies = []
+  , dagDependencies = []
   , adjacencyList = Map.empty
   , reverseAdjacency = Map.empty
   , topologicalOrder = Nothing
@@ -218,11 +216,11 @@ addDependency fromOp toOp depType depWire dag = do
       let newRevAdj = Map.insertWith (++) toOp [fromOp] (reverseAdjacency dag)
 
       -- Add to dependency list
-      let newDep = Dependency fromOp toOp depType depWire 0 : dependencies dag
+      let newDep = Dependency fromOp toOp depType depWire 0 : dagDependencies dag
 
       Right $ dag
         { operations = newOps'
-        , dependencies = newDep
+        , dagDependencies = newDep
         , adjacencyList = newAdj
         , reverseAdjacency = newRevAdj
         , topologicalOrder = Nothing
@@ -316,13 +314,13 @@ validateDAG dag = do
 
   -- Check all dependencies reference existing operations
   let allOpIds = Set.fromList (Map.keys (operations dag))
-  let deps = Set.fromList $ concatMap (\d -> [depFrom d, depTo d]) (dependencies dag)
+  let deps = Set.fromList $ concatMap (\d -> [depFrom d, depTo d]) (dagDependencies dag)
   if not (Set.isSubsetOf deps allOpIds)
     then Left "Dependency references non-existent operation"
     else Right ()
 
   -- Check no self-dependencies
-  forM_ (dependencies dag) $ \dep ->
+  forM_ (dagDependencies dag) $ \dep ->
     if depFrom dep == depTo dep
       then Left "Operation has self-dependency"
       else Right ()
@@ -336,7 +334,7 @@ serializeToDot dag =
     ["digraph CircuitDAG {"]
     ++ ["  rankdir=LR"]
     ++ map operationNode (Map.elems (operations dag))
-    ++ map dependencyEdge (dependencies dag)
+    ++ map dependencyEdge (dagDependencies dag)
     ++ ["}"]
   where
     operationNode op =

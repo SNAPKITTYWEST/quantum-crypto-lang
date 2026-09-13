@@ -14,15 +14,30 @@
 module QCL.Verification.Equivalence where
 
 import Data.Aeson
+import Data.Complex
 import Data.List (sortBy, nubBy)
 import Data.Ord (comparing)
 import GHC.Generics
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import qualified Data.Vector as V
 
 import QCL.IR.Circuit
 import QCL.IR.Gate
 import QCL.IR.Operation
+import QCL.IR.Wire (WireId(..))
+
+-- | Extract target qubit indices from an Operation via its gate or target wires
+opTargetQubits :: Operation -> [Int]
+opTargetQubits op = case gate op of
+  Just g  -> QCL.IR.Gate.targetQubits g
+  Nothing -> map (\(WireId i) -> i) (targetWires op)
+
+-- | Extract control qubit indices from an Operation via its gate or control wires
+opControlQubits :: Operation -> [Int]
+opControlQubits op = case gate op of
+  Just g  -> QCL.IR.Gate.controlQubits g
+  Nothing -> map (\(WireId i) -> i) (controlWires op)
 
 -- | Equivalence relation type
 data EquivalenceType
@@ -57,27 +72,34 @@ checkIdentical c1 c2 =
       ops2 = getAllOperations (circuitDAG c2)
   in length ops1 == length ops2 &&
      all (\(o1, o2) -> opType o1 == opType o2 &&
-                       targetQubits o1 == targetQubits o2 &&
-                       timestamp o1 == timestamp o2) (zip ops1 ops2)
+                       opTargetQubits o1 == opTargetQubits o2 &&
+                       QCL.IR.Operation.timestamp o1 == QCL.IR.Operation.timestamp o2) (zip ops1 ops2)
 
 -- | Check if gates commute (operate on different wires)
 gatesCommute :: Operation -> Operation -> Bool
 gatesCommute o1 o2 =
-  let wires1 = Set.fromList (controlQubits o1 ++ targetQubits o1)
-      wires2 = Set.fromList (controlQubits o2 ++ targetQubits o2)
+  let wires1 = Set.fromList (opControlQubits o1 ++ opTargetQubits o1)
+      wires2 = Set.fromList (opControlQubits o2 ++ opTargetQubits o2)
   in Set.null (Set.intersection wires1 wires2)
 
 -- | Compute canonical form (normalized ordering)
 canonicalForm :: Circuit -> [Operation]
 canonicalForm circ =
   let ops = getAllOperations (circuitDAG circ)
-      -- Group by time step
-      byTime = Map.fromListWith (++) [(timestamp op, [op]) | op <- ops]
-      -- Sort within each time step by wire index
-      sorted = concat [sortBy (comparing (head . targetQubits))
-                              (Map.findWithDefault [] t byTime)
-                       | t <- [0 .. maximum (map timestamp ops)]]
-  in sorted
+  in case ops of
+    [] -> []
+    _ ->
+      let -- Group by time step
+          byTime = Map.fromListWith (++) [(QCL.IR.Operation.timestamp op, [op]) | op <- ops]
+          -- Safe wire index extraction: default to maxBound for ops with no target qubits
+          safeFirstTarget op = case opTargetQubits op of
+            (q:_) -> q
+            []     -> maxBound
+          -- Sort within each time step by wire index
+          sorted = concat [sortBy (comparing safeFirstTarget)
+                                  (Map.findWithDefault [] t byTime)
+                           | t <- [0 .. maximum (map QCL.IR.Operation.timestamp ops)]]
+      in sorted
 
 -- | Check if circuits are commutatively equivalent
 checkCommutative :: Circuit -> Circuit -> Bool
@@ -85,8 +107,29 @@ checkCommutative c1 c2 =
   canonicalForm c1 == canonicalForm c2
 
 -- | Normalize circuit (apply standard transformations)
+-- Sorts commuting gates into canonical order within each time layer
 normalizeCircuit :: Circuit -> Circuit
-normalizeCircuit = id  -- Identity for now; real implementation would normalize
+normalizeCircuit circ =
+  let ops = getAllOperations (circuitDAG circ)
+  in case ops of
+    [] -> circ
+    _ ->
+      let -- Group into time layers
+          byTime = Map.fromListWith (++) [(QCL.IR.Operation.timestamp op, [op]) | op <- ops]
+          -- Within each layer, bubble-sort commuting pairs into canonical order
+          normalizedLayers = Map.map sortCommutingOps byTime
+          -- Rebuild the sorted ops list
+          sortedOps = concatMap snd (Map.toAscList normalizedLayers)
+          -- Rebuild circuit DAG with reordered operations
+          newDAG = foldl (\dag op -> addOperation op dag) emptyCircuitDAG sortedOps
+      in circ { circuitDAG = newDAG }
+
+-- | Sort operations within a time layer by target qubit index (for commuting gates)
+sortCommutingOps :: [Operation] -> [Operation]
+sortCommutingOps ops =
+  sortBy (comparing (\op -> case opTargetQubits op of
+                              (q:_) -> q
+                              []     -> maxBound)) ops
 
 -- | Circuit signature (fingerprint for quick rejection)
 data CircuitSignature = CircuitSignature
@@ -126,13 +169,73 @@ signatureCompatible s1 s2 =
   sigOpCount s1 == sigOpCount s2 &&
   sigGateMultiset s1 == sigGateMultiset s2
 
+-- | Type alias for 2x2 complex matrix (row-major as flat vector of 4 elements)
+type Matrix2x2 = (Complex Double, Complex Double, Complex Double, Complex Double)
+
+-- | Multiply two 2x2 matrices
+mul2x2 :: Matrix2x2 -> Matrix2x2 -> Matrix2x2
+mul2x2 (a00, a01, a10, a11) (b00, b01, b10, b11) =
+  ( a00*b00 + a01*b10, a00*b01 + a01*b11
+  , a10*b00 + a11*b10, a10*b01 + a11*b11 )
+
+-- | Identity 2x2 matrix
+identity2x2 :: Matrix2x2
+identity2x2 = (1, 0, 0, 1)
+
+-- | Get 2x2 matrix for a canonical gate
+canonicalMatrix :: CanonicalGate -> Matrix2x2
+canonicalMatrix g =
+  let m = getPauliMatrix g
+  in case m of
+    [[a,b],[c,d]] -> (a, b, c, d)
+    _ -> identity2x2
+
+-- | Compute composite unitary for all single-qubit gates on one qubit
+computeSingleQubitUnitary :: [Operation] -> Int -> Matrix2x2
+computeSingleQubitUnitary ops qubit =
+  let relevantOps = filter (\op -> opTargetQubits op == [qubit] &&
+                                   opType op == GateOperation) ops
+      sortedOps = sortBy (comparing QCL.IR.Operation.timestamp) relevantOps
+      getMatrix op = case gate op of
+        Just g -> case gateType g of
+          UnaryGate cg -> canonicalMatrix cg
+          _            -> identity2x2
+        Nothing -> identity2x2
+  in foldl mul2x2 identity2x2 (map getMatrix sortedOps)
+
+-- | Check if two 2x2 matrices are approximately equal (up to global phase)
+matricesApproxEqual :: Matrix2x2 -> Matrix2x2 -> Bool
+matricesApproxEqual (a00, a01, a10, a11) (b00, b01, b10, b11) =
+  let eps = 1e-10
+      closeEnough x y = magnitude (x - y) < eps
+  in -- First try direct comparison
+     (closeEnough a00 b00 && closeEnough a01 b01 &&
+      closeEnough a10 b10 && closeEnough a11 b11) ||
+     -- Try with global phase factor (if a00 /= 0 and b00 /= 0)
+     (magnitude a00 > eps && magnitude b00 > eps &&
+      let phase = b00 / a00
+      in closeEnough (a00 * phase) b00 && closeEnough (a01 * phase) b01 &&
+         closeEnough (a10 * phase) b10 && closeEnough (a11 * phase) b11)
+
 -- | Check unitary equivalence (matrix comparison)
--- For now, returns uncertain; real implementation would compute matrices
+-- For small circuits (<=8 qubits), compute actual unitary matrices per qubit and compare.
+-- For larger circuits, fall back to signature comparison.
 checkUnitaryEquivalent :: Circuit -> Circuit -> Bool
 checkUnitaryEquivalent c1 c2 =
   let sig1 = computeSignature c1
       sig2 = computeSignature c2
-  in signatureCompatible sig1 sig2
+  in if not (signatureCompatible sig1 sig2)
+     then False
+     else if sigQubitCount sig1 <= 8
+          then -- Compute per-qubit unitaries and compare
+               let ops1 = getAllOperations (circuitDAG c1)
+                   ops2 = getAllOperations (circuitDAG c2)
+                   nQubits = sigQubitCount sig1
+                   qubitRange = [0 .. nQubits - 1]
+                   unitaries1 = map (computeSingleQubitUnitary ops1) qubitRange
+                   unitaries2 = map (computeSingleQubitUnitary ops2) qubitRange
+               in all (uncurry matricesApproxEqual) (zip unitaries1 unitaries2)
+          else signatureCompatible sig1 sig2  -- Fall back for large circuits
 
 -- | Check measurement equivalence
 checkMeasurementEquivalent :: Circuit -> Circuit -> Bool

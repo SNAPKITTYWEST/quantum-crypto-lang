@@ -23,7 +23,6 @@ import Data.Complex
 import GHC.Generics
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import qualified Data.Text as T
 import Data.List (sortBy)
 import Data.Ord (comparing)
 
@@ -62,7 +61,7 @@ data RotationGate
   | Ry Double         -- ^ Rotation around Y-axis
   | Rz Double         -- ^ Rotation around Z-axis
   | PhaseShift Double -- ^ Global phase shift
-  deriving (Show, Eq, Generic)
+  deriving (Show, Eq, Ord, Generic)
 
 instance ToJSON RotationGate
 instance FromJSON RotationGate
@@ -74,10 +73,11 @@ data TwoQubitGate
   | CZ                -- ^ Controlled Z
   | SWAP              -- ^ Swap qubits
   | iSWAP             -- ^ iSWAP
+  | iSWAP_adjoint     -- ^ iSWAP† (conjugate transpose)
   | XX Double         -- ^ Parametric XX interaction
   | YY Double         -- ^ Parametric YY interaction
   | ZZ Double         -- ^ Parametric ZZ interaction
-  deriving (Show, Eq, Generic)
+  deriving (Show, Eq, Ord, Generic)
 
 instance ToJSON TwoQubitGate
 instance FromJSON TwoQubitGate
@@ -167,7 +167,8 @@ adjointTwoQubit g = case g of
   CY -> CY
   CZ -> CZ
   SWAP -> SWAP
-  iSWAP -> iSWAP  -- iSWAP is self-adjoint up to phase
+  iSWAP -> iSWAP_adjoint  -- iSWAP is NOT self-adjoint; adjoint negates the imaginary phase
+  iSWAP_adjoint -> iSWAP
   XX theta -> XX (-theta)
   YY theta -> YY (-theta)
   ZZ theta -> ZZ (-theta)
@@ -409,9 +410,15 @@ decompose g = do
           rz = createParametricGate (GateId (base ++ "_rz")) (Rz (pi/4)) (timestamp g) (targetQubits g !! 0)
       in Right [rz]
 
-    -- CNOT = Ry(-π/4) on target, CZ, Ry(π/4) on target (simplified)
+    -- CNOT = (I⊗H)(CZ)(I⊗H): H on target, CZ, H on target
     BinaryGate CNOT ->
-      Left "CNOT decomposition not yet implemented"
+      let (GateId base) = gateId g
+          target = head (targetQubits g)
+          control = head (controlQubits g)
+          h1 = createUnaryGate (GateId (base ++ "_h1")) H (timestamp g) target
+          cz = createBinaryGate (GateId (base ++ "_cz")) CZ (timestamp g + 1) control target
+          h2 = createUnaryGate (GateId (base ++ "_h2")) H (timestamp g + 2) target
+      in Right [h1, cz, h2]
 
     -- Single gates with no decomposition
     UnaryGate _ -> Right [g]

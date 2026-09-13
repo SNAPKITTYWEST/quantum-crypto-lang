@@ -30,6 +30,8 @@ data QuantumType
   | TAncilla Int                    -- ^ n ancilla qubits (linear, reset-able)
   | TClassicalBit                   -- ^ Classical bit (unrestricted)
   | TClassicalInt                   -- ^ Classical integer (unrestricted)
+  | TClassicalFloat                 -- ^ Classical floating-point (unrestricted)
+  | TClassicalString                -- ^ Classical string (unrestricted)
   | TMeasured QuantumType           -- ^ Result of measurement (becomes classical)
   | TQuantumKey Int                 -- ^ Cryptographic key (linear, n bits)
   | TQuantumNonce Int               -- ^ Cryptographic nonce (linear, n bits)

@@ -9,9 +9,6 @@
 module QCL.IR.Circuit where
 
 import Data.Aeson
-import Data.List (sortBy, foldl')
-import Data.Ord (comparing)
-import Data.Maybe (catMaybes)
 import GHC.Generics
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -174,7 +171,7 @@ instance FromJSON CircuitStats
 getCircuitStats :: Circuit -> Either String CircuitStats
 getCircuitStats circ = do
   let qubits = registerSize (wireRegister circ)
-  let gateCount = gateCount (gateLibrary circ)
+  let gc = gateCount (gateLibrary circ)
   let dagOps = operationCount (circuitDAG circ)
   let (gates, meas, _, _) = countOperationsByType (circuitDAG circ)
   depth <- getCircuitDepth (circuitDAG circ)
@@ -182,7 +179,7 @@ getCircuitStats circ = do
 
   Right $ CircuitStats
     { statsQubitCount = qubits
-    , statsGateCount = gateCount
+    , statsGateCount = gc
     , statsDepth = depth
     , statsWidth = width
     , statsOperationCount = dagOps

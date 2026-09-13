@@ -303,8 +303,8 @@ readString state =
     Nothing -> ("", state)
 
 -- | Main lexer loop
-lex :: LexerState -> Either String [Token]
-lex state =
+runLexer :: LexerState -> Either String [Token]
+runLexer state =
   let state' = skipWhitespace state
   in case peekChar state' of
     Nothing -> Right (tokens state')
@@ -363,7 +363,7 @@ lex state =
 
     Just '&' -> case peekString 2 state' of
       "&&" -> lex (addToken Op_And "&&" (advance (advance state')))
-      _ -> lex (Left $ "Unexpected character: &")
+      _ -> lex (addToken (Error "Unexpected character: &") "&" (advance state'))
 
     Just '|' -> case peekString 2 state' of
       "||" -> lex (addToken Op_Or "||" (advance (advance state')))
@@ -376,13 +376,13 @@ lex state =
       lex (addToken (StringLiteral str) ("\"" ++ str ++ "\"") state'')
 
     Just c | isAlpha c || c == '_' -> do
-      let (ident, state'') = readIdentifier state'
+      let (ident, state'') = readIdentifier (advance state')
       let fullIdent = c : ident
       let tokenType = if isKeyword fullIdent then keywordToToken fullIdent else Identifier fullIdent
       lex (addToken tokenType fullIdent state'')
 
     Just c | isDigit c -> do
-      let (numStr, state'') = readNumber state'
+      let (numStr, state'') = readNumber (advance state')
       let fullNum = c : numStr
       case reads fullNum of
         [(n, "")] -> lex (addToken (IntLiteral n) fullNum state'')

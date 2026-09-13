@@ -170,7 +170,13 @@ parseWireDefinition line lineNum = do
                 }
         _ -> Left "Invalid wire definition syntax"
 
-    stripComments s = takeWhile (/='-') s
+    stripComments s = stripHaskellLineComment s
+
+-- | Strip Haskell-style line comments (--) without breaking on single dashes or negatives
+stripHaskellLineComment :: String -> String
+stripHaskellLineComment [] = []
+stripHaskellLineComment ('-':'-':_) = []
+stripHaskellLineComment (c:cs) = c : stripHaskellLineComment cs
 
 -- | Parse all wire definitions from source
 parseWires :: String -> Either String [QuipperWire]
@@ -181,7 +187,7 @@ parseWires source =
         [ case parseWireDefinition line num of
             Right w -> Just w
             Left "Skip" -> Nothing
-            Left err -> Just (error err)
+            Left _err -> Nothing  -- Skip unparseable lines instead of crashing
           | (num, line) <- indexed
         ]
   in Right parsed
@@ -282,7 +288,7 @@ parseGates source =
         [ case parseGateDefinition line num of
             Right g -> Just g
             Left "Skip" -> Nothing
-            Left err -> Just (error err)
+            Left _err -> Nothing  -- Skip unparseable lines instead of crashing
           | (num, line) <- indexed
         ]
   in Right parsed
@@ -342,28 +348,33 @@ addQuipperGate wires circ qgate = do
           Right c'
         _ -> Left "Unary gate requires exactly one target"
 
-    addParametricGate c rotGate tgt gid params = do
+    addParametricGate c rotGateCtor tgt gid params = do
       case tgt of
         [tname] -> do
           idx <- wireNameToIndex wires tname
           let time = operationCount (circuitDAG c)
           let angle = fromMaybe 0.0 (Map.lookup "theta" params `orElse` Map.lookup "phi" params)
-          let g = case rotGate of
-                Rx -> UnaryGate I  -- Placeholder; actual rotation gates need different handling
-                Ry -> UnaryGate I
-                Rz -> UnaryGate I
-          (c', _) <- addGateToCircuit (GateId gid) I time idx c  -- Simplified for now
-          Right c'
+          let rotation = rotGateCtor angle
+          let g = createParametricGate (GateId gid) rotation time idx
+          let opid = OperationId gid
+          let op = createGateOperation opid g [WireId idx] [] time
+          case addOperationToCircuit op c of
+            Left err -> Left $ "Failed to add parametric gate: " ++ err
+            Right c' -> Right c' { gateLibrary = addGate g (gateLibrary c') }
         _ -> Left "Parametric gate requires exactly one target"
 
-    addBinaryGate c g ctrl tgt gid = do
+    addBinaryGate c twoqGate ctrl tgt gid = do
       case (ctrl, tgt) of
         ([cname], [tname]) -> do
           cidx <- wireNameToIndex wires cname
           tidx <- wireNameToIndex wires tname
           let time = operationCount (circuitDAG c)
-          (c', _) <- addGateToCircuit (GateId gid) I time tidx c
-          Right c'
+          let g = createBinaryGate (GateId gid) twoqGate time cidx tidx
+          let opid = OperationId gid
+          let op = createGateOperation opid g [WireId cidx, WireId tidx] [WireId cidx] time
+          case addOperationToCircuit op c of
+            Left err -> Left $ "Failed to add binary gate: " ++ err
+            Right c' -> Right c' { gateLibrary = addGate g (gateLibrary c') }
         _ -> Left "Binary gate requires exactly one control and one target"
 
 -- | Convert wire name to index
