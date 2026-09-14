@@ -353,9 +353,6 @@ cabal build QCL.Daemon.AsyncExecutor
 - Communicating Sequential Processes (CSP for daemon architecture)
 - Linear/Affine Types (quantum ownership discipline)
 
-## License
-
-MIT
 
 ## Authors
 
